@@ -1,0 +1,79 @@
+name: Copy ECR Images to Prod Envs
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment. To pick specific container registry'
+        required: true
+        type: choice
+        options:
+          - prod
+          - prod-aps1
+jobs:
+  copy-images-from-ecr:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+    - name: Execute Copy ECR Images Action
+      uses: ./.github/actions/copy-ecr-images
+      with:
+        environment: ${{ github.event.inputs.environment }}
+      env:
+        AWS_REGION: ap-south-1
+        SOURCE_REGISTRY: 546918106283.dkr.ecr.ap-south-1.amazonaws.com
+        # Add any other required environment variables here
+----
+name: Copy ECR Images
+description: 'Copies Docker images from a source ECR registry to a destination ECR registry based on environment input.'
+inputs:
+  environment:
+    description: 'Environment to pick specific container registry'
+    required: true
+    type: string
+runs:
+  using: 'composite'
+  steps:
+    - name: Set Destination Account ID
+      id: set-destination
+      run: |
+        if [ "${{ inputs.environment }}" == "prod" ]; then
+          echo "DESTINATION_ACCOUNT_ID=590184120871" >> $GITHUB_ENV
+        elif [ "${{ inputs.environment }}" == "prod-aps1" ]; then
+          echo "DESTINATION_ACCOUNT_ID=058264190167" >> $GITHUB_ENV
+        else
+          echo "Invalid environment specified"
+          exit 1
+        fi
+        echo "DESTINATION_REGISTRY=${DESTINATION_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> $GITHUB_ENV
+    - name: Retrieve Repositories List
+      id: retrieve-repos
+      run: |
+        cd k8s/charts
+        REPOSITORIES=$(grep -iR com.unifyapps | grep name: | awk -F " " '{print $3}' | sed 's|546918106283.dkr.ecr.ap-south-1.amazonaws.com/||' | sort | uniq)
+        echo "REPOSITORIES=$REPOSITORIES" >> $GITHUB_ENV
+    - name: Configure AWS Credentials for Source Account
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.SOURCE_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.SOURCE_AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    - name: Login to Source ECR
+      id: login-source
+      run: |
+        aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.SOURCE_REGISTRY }}
+    - name: Pull Images from Source ECR
+      run: |
+        for repo in ${{ env.REPOSITORIES }}; do
+          docker pull ${{ env.SOURCE_REGISTRY }}/$repo:latest
+        done
+    - name: Login to Destination ECR
+      id: login-dest
+      run: |
+        aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.DESTINATION_REGISTRY }}
+    - name: Tag and Push Images to Destination ECR
+      run: |
+        for repo in ${{ env.REPOSITORIES }}; do
+          docker tag ${{ env.SOURCE_REGISTRY }}/$repo:latest ${{ env.DESTINATION_REGISTRY }}/$repo:latest
+          docker push ${{ env.DESTINATION_REGISTRY }}/$repo:latest
+        done
